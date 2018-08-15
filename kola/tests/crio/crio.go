@@ -147,7 +147,6 @@ var crioContainerTemplate = `{
 	}
 }`
 
-
 // init runs when the package is imported and takes care of registering tests
 func init() {
 	register.Register(&register.Test{
@@ -176,7 +175,7 @@ func crioBaseTests(c cluster.TestCluster) {
 func generateCrioConfig(name string, command []string) (string, string) {
 	fileContentsPod := fmt.Sprintf(crioPodTemplate, name, name)
 
-	tmpFilePod, err := ioutil.TempFile("", name + "Pod")
+	tmpFilePod, err := ioutil.TempFile("", name+"Pod")
 	if err != nil {
 		panic(err.Error())
 	}
@@ -187,7 +186,7 @@ func generateCrioConfig(name string, command []string) (string, string) {
 	cmd := strings.Join(command, " ")
 	fileContentsContainer := fmt.Sprintf(crioContainerTemplate, name, name, cmd)
 
-	tmpFileContainer, err := ioutil.TempFile("", name + "Container")
+	tmpFileContainer, err := ioutil.TempFile("", name+"Container")
 	if err != nil {
 		panic(err.Error())
 	}
