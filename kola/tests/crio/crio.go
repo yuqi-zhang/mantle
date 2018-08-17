@@ -15,7 +15,6 @@
 package crio
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -52,7 +51,7 @@ var crioPodTemplate = `{
 	"image": {
 			"image": "localhost/%s:latest"
 	},
-	"args": ["sh", "init.sh"],
+	"args": [],
 	"readonly_rootfs": false,
 	"log_path": "",
 	"stdin": false,
@@ -155,13 +154,12 @@ func init() {
 		Name:        `crio.base`,
 		Distros:     []string{"rhcos"},
 	})
-	// TODO: Enable these once crio.base works fully
-	// register.Register(&register.Test{
-	// 	Run:         crioNetwork,
-	// 	ClusterSize: 2,
-	// 	Name:        "crio.network",
-	// 	Distros:     []string{"rhcos"},
-	// })
+	register.Register(&register.Test{
+		Run:         crioNetwork,
+		ClusterSize: 2,
+		Name:        "crio.network",
+		Distros:     []string{"rhcos"},
+	})
 }
 
 // crioBaseTests executes multiple tests under the "base" name
@@ -226,19 +224,6 @@ func genContainer(c cluster.TestCluster, m platform.Machine, name string, binnam
 	return path.Base(configPathPod), path.Base(configPathContainer), nil
 }
 
-// TODO: MOVE TO genContainer
-// genCrioPodConfig generates a pod config so crictl runp will run the container
-func genCrioPodConfig(c cluster.TestCluster, imageName, fileName, arg string) (string, error) {
-	crioPodConfig := fmt.Sprintf(crioPodTemplate, imageName, arg)
-	if err := ioutil.WriteFile(fileName, []byte(crioPodConfig), 0644); err != nil {
-		return "", err
-	}
-	if err := c.DropFile(fileName); err != nil {
-		return "", err
-	}
-	return fileName, nil
-}
-
 // crioNetwork ensures that crio containers can make network connections outside of the host
 func crioNetwork(c cluster.TestCluster) {
 	machines := c.Machines()
@@ -246,21 +231,29 @@ func crioNetwork(c cluster.TestCluster) {
 
 	c.Log("creating ncat containers")
 
-	genContainer(c, src, "ncat", []string{"ncat"}, []string{"ncat"})
-	genContainer(c, dest, "ncat", []string{"ncat"}, []string{"ncat"})
+	// Since genContainer also generates crio pod/container configs,
+	// there will be a duplicate config file on each machine.
+	// Thus we only save one set for later use.
+	crioConfigPod, crioConfigContainer, err := genContainer(c, src, "ncat", []string{"ncat", "echo"}, []string{"ncat"})
+	if err != nil {
+		c.Fatal(err)
+	}
+	_, _, err = genContainer(c, dest, "ncat", []string{"ncat", "echo"}, []string{"ncat"})
+	if err != nil {
+		c.Fatal(err)
+	}
 
 	listener := func(ctx context.Context) error {
-		// Will block until a message is recieved
-		// TODO: use genContainer instead
-		genCrioPodConfig(c, "ncat", "ncat-server.json",
-			`echo "HELLO FROM SERVER" | ncat --idle-timeout 20 --listen 0.0.0.0 9988`)
-		out, err := c.SSH(dest, "crictl runp ncat-server.json")
-		if err != nil {
-			return err
-		}
+		cmdCreatePod := fmt.Sprintf("sudo crictl runp %s", crioConfigPod)
+		podID := c.MustSSH(dest, cmdCreatePod)
+		cmdCreateContainer := fmt.Sprintf("sudo crictl create %s %s %s", podID, crioConfigContainer, crioConfigPod)
+		containerID := c.MustSSH(dest, cmdCreateContainer)
+		cmdExecContainer := fmt.Sprintf("sudo crictl exec -t %s echo 'HELLO FROM SERVER' | ncat --idle-timeout 20 --listen 0.0.0.0 9988", containerID)
 
-		if !bytes.Equal(out, []byte("HELLO FROM CLIENT")) {
-			return fmt.Errorf("unexpected result from listener: %q", out)
+		// This command will block until a message is recieved
+		output := string(c.MustSSH(dest, cmdExecContainer))
+		if output != "HELLO FROM CLIENT" {
+			return fmt.Errorf("unexpected result from listener: %s", output)
 		}
 
 		return nil
@@ -269,7 +262,7 @@ func crioNetwork(c cluster.TestCluster) {
 	talker := func(ctx context.Context) error {
 		// Wait until listener is ready before trying anything
 		for {
-			_, err := c.SSH(dest, "sudo lsof -i TCP:9988 -s TCP:LISTEN | grep 9988 -q")
+			_, err := c.SSH(dest, "sudo netstat -tulpn|grep 9988")
 			if err == nil {
 				break // socket is ready
 			}
@@ -286,17 +279,16 @@ func crioNetwork(c cluster.TestCluster) {
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
+		cmdCreatePod := fmt.Sprintf("sudo crictl runp %s", crioConfigPod)
+		podID := c.MustSSH(src, cmdCreatePod)
+		cmdCreateContainer := fmt.Sprintf("sudo crictl create %s %s %s", podID, crioConfigContainer, crioConfigPod)
+		containerID := c.MustSSH(src, cmdCreateContainer)
+		cmdExecContainer := fmt.Sprintf("sudo crictl exec -t %s echo 'HELLO FROM CLIENT' | ncat %s 9988",
+			containerID, dest.PrivateIP())
 
-		genCrioPodConfig(c, "ncat", "ncat-client.json",
-			fmt.Sprintf(`echo "HELLO FROM CLIENT" | ncat %s 9988`, dest.PrivateIP()))
-		out, err := c.SSH(src, "crictl runp ncat-client.json")
-
-		if err != nil {
-			return err
-		}
-
-		if !bytes.Equal(out, []byte("HELLO FROM SERVER")) {
-			return fmt.Errorf(`unexpected result from listener: "%v"`, out)
+		output := string(c.MustSSH(src, cmdExecContainer))
+		if output != "HELLO FROM SERVER" {
+			return fmt.Errorf(`unexpected result from listener: "%s"`, output)
 		}
 
 		return nil
