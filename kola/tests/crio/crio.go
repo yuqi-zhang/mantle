@@ -209,16 +209,11 @@ func genContainer(c cluster.TestCluster, m platform.Machine, name string, binnam
 		return "", "", err
 	}
 
-	// This shell script creates both the image for testing and the fake pause image
-	// required by crio
+	// This shell script creates the crio image used for testing
 	cmd := `tmpdir=$(mktemp -d); cd $tmpdir; echo -e "FROM scratch\nCOPY . /" > Dockerfile;
 	        b=$(which %s); libs=$(sudo ldd $b | grep -o /lib'[^ ]*' | sort -u);
 			sudo rsync -av --relative --copy-links $b $libs ./;
-			c=$(which sleep); libs=$(sudo ldd $c | grep -o /lib'[^ ]*' | sort -u);
-			sudo rsync -av --relative --copy-links $c $libs ./;
-			echo "#!/bin/bash\n$c 30" > ./pause;
-			chmod a+x ./pause;
-			sudo podman build -t %s -t kubernetes/pause .`
+			sudo podman build -t %s .`
 	c.MustSSH(m, fmt.Sprintf(cmd, strings.Join(binnames, " "), name))
 
 	return path.Base(configPathPod), path.Base(configPathContainer), nil
@@ -248,7 +243,7 @@ func crioNetwork(c cluster.TestCluster) {
 		podID := c.MustSSH(dest, cmdCreatePod)
 		cmdCreateContainer := fmt.Sprintf("sudo crictl create %s %s %s", podID, crioConfigContainer, crioConfigPod)
 		containerID := c.MustSSH(dest, cmdCreateContainer)
-		cmdExecContainer := fmt.Sprintf("sudo crictl exec -t %s echo 'HELLO FROM SERVER' | ncat --idle-timeout 20 --listen 0.0.0.0 9988", containerID)
+		cmdExecContainer := fmt.Sprintf("sudo timeout 30 crictl exec -t %s echo 'HELLO FROM SERVER' | timeout 20 ncat --listen 0.0.0.0 9988 || echo 'LISTENER TIMEOUT'", containerID)
 
 		// This command will block until a message is recieved
 		output := string(c.MustSSH(dest, cmdExecContainer))
